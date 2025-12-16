@@ -3665,8 +3665,8 @@ class SessionManager:
                     return _build_final_completion_prompt(bot_config, current_data)
 
             else:
-                # 서브봇이 아직 실행되지 않았음 → LLM이 call_subbot 액션을 실행하도록 프롬프트 생성
-                print(f"🤖 서브봇 호출 프롬프트 생성!")
+                # 서브봇이 아직 실행되지 않았음 → 즉시 서브봇으로 전환!
+                print(f"🤖 서브봇으로 전환!")
                 print(f"   필드명: {current_field_name}")
                 print(f"   서브봇 ID: {sub_bot_id}")
 
@@ -3678,52 +3678,27 @@ class SessionManager:
 
                 print(f"✅ 서브봇 설정 로드 완료: {sub_bot_config.task_name}")
 
-                # ✅ 서브봇 호출을 유도하는 시스템 프롬프트 생성
-                purpose = current_var.get('purpose', sub_bot_config.task_name)
-                description = current_var.get('description', '')
+                # ✅ 1. 서브봇 실행 이력 기록
+                from datetime import datetime
+                executed_subbots[sub_bot_id] = {
+                    'called_from': bot_config.bot_id,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+                session.set_metadata('executed_subbots', executed_subbots)
+                print(f"   📝 서브봇 실행 이력 기록")
 
-                # llm_execution_guide에서 메시지 추출
-                llm_guide = current_var.get('llm_execution_guide', {})
-                before_execution = llm_guide.get('before_execution', f"{sub_bot_config.task_name}을(를) 시작하겠습니다.")
+                # ✅ 2. 서브봇으로 전환 (push_bot)
+                session.push_bot(sub_bot_id)
+                print(f"   🔄 봇 스택 전환: {bot_config.bot_id} → {sub_bot_id}")
 
-                return f"""
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🤖 서브봇 호출 필요
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # ✅ 3. 히스토리 백업 (서브봇은 깨끗한 상태로 시작)
+                session._main_bot_history = list(session.conversation_history)
+                session.conversation_history = []
+                print(f"   🧹 히스토리 백업 완료")
 
-<current_field>
-  <field_name>{current_field_name}</field_name>
-  <type>subbot_call</type>
-  <sub_bot_id>{sub_bot_id}</sub_bot_id>
-  <subbot_name>{sub_bot_config.task_name}</subbot_name>
-  <purpose>{purpose}</purpose>
-  <description>{description}</description>
-</current_field>
-
-**현재 상태:**
-{dict_to_xml(current_data, 'collected_data')}
-
-**다음 단계:**
-현재 단계에서는 **서브봇 호출**이 필요합니다.
-{sub_bot_config.task_name} 작업을 수행하기 위해 서브봇을 호출합니다.
-
-🔥 **즉시 실행해야 할 XML:**
-```xml
-<bot_response>
-  <message>{before_execution}</message>
-  <actions>
-    <action type="call_subbot">
-      <subbot_id>{sub_bot_id}</subbot_id>
-      <purpose>{purpose}</purpose>
-    </action>
-  </actions>
-</bot_response>
-```
-
-⚠️ **중요: 위의 XML을 그대로 응답하세요!**
-- 서브봇이 호출되면 해당 작업을 수행합니다
-- 서브봇 완료 후 자동으로 메인봇으로 복귀합니다
-""" 
+                # ✅ 4. 서브봇 프롬프트 생성 (경로 1: bot_config.is_subbot과 동일)
+                print(f"   📄 서브봇 프롬프트 생성 (_build_subbot_prompt 호출)")
+                return _build_subbot_prompt(sub_bot_config, current_data) 
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 7️⃣ 현재 step 안내
