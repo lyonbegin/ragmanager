@@ -1121,18 +1121,6 @@ class XMLActionExecutor:
 
         print(f"   🔄 서브봇 전환: {session.get_active_bot()} → {subbot_id}")
 
-        # ✅ 서브봇 실행 이력 기록 (중복 호출 방지)
-        from datetime import datetime
-        executed_subbots = session.get_metadata('executed_subbots', {})
-        current_bot = session.get_active_bot()
-
-        executed_subbots[subbot_id] = {
-            'called_from': current_bot,
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        session.set_metadata('executed_subbots', executed_subbots)
-        print(f"   📝 서브봇 실행 이력 기록: {subbot_id}")
-
         # ✅ 즉시 전환
         session.push_bot(subbot_id)
 
@@ -3632,73 +3620,31 @@ class SessionManager:
         print(f"🔍 현재 필드 타입: {'서브봇 ❌' if is_current_subbot else 'user_input ✅'}")
 
         if is_current_subbot:
+            print(f"🤖 서브봇으로 전환!")
+            print(f"   필드명: {current_field_name}")
+
             sub_bot_id = current_var.get('sub_bot_id', '')
+            sub_bot_config = config_manager.get_bot_config(sub_bot_id)
 
-            # ✅✅✅ 서브봇 실행 이력 확인 (중복 호출 방지!)
-            executed_subbots = session.get_metadata('executed_subbots', {})
+            if not sub_bot_config:
+                logger.error(f"❌ 서브봇 설정을 찾을 수 없음: {sub_bot_id}")
+                return f"ERROR: 서브봇 설정을 찾을 수 없습니다: {sub_bot_id}"
 
-            if sub_bot_id in executed_subbots:
-                print(f"⏭️  서브봇 이미 실행됨: {sub_bot_id}")
-                print(f"   실행 시각: {executed_subbots[sub_bot_id].get('timestamp', 'N/A')}")
-                print(f"   호출자: {executed_subbots[sub_bot_id].get('called_from', 'N/A')}")
-                print(f"   ➡️  다음 필드로 건너뛰기")
+            print(f"   서브봇 ID: {sub_bot_id}")
+            print(f"✅ 서브봇 설정 로드 완료: {sub_bot_config.task_name}")
 
-                # 다음 필드로 이동
-                if next_field_name and next_var:
-                    print(f"   📌 다음 필드를 현재 필드로 재설정: {next_field_name}")
-                    current_field_name = next_field_name
-                    current_var = next_var
+            # 서브봇으로 전환 (push_bot)
+            session.push_bot(sub_bot_id)
+            print(f"   🔄 봇 스택 전환: {bot_config.bot_id} → {sub_bot_id}")
 
-                    # 다음 필드도 서브봇인지 재확인
-                    is_current_subbot = 'sub_bot_id' in current_var
+            # 히스토리 백업 (서브봇은 깨끗한 상태로 시작)
+            session._main_bot_history = list(session.conversation_history)
+            session.conversation_history = []
+            print(f"   🧹 히스토리 백업 완료")
 
-                    if is_current_subbot:
-                        # 다음 필드도 서브봇! 재귀적으로 체크 필요
-                        logger.warning(f"⚠️  연속된 서브봇 필드 감지: {next_field_name}")
-                        # 간단하게는 다음 서브봇도 실행 이력 확인 후 처리
-                        # 복잡한 경우 재귀 호출 고려
-                        # 여기서는 일단 경고만 출력하고 계속 진행
-                        # (다음 턴에서 다시 처리됨)
-                else:
-                    # 다음 필드 없음 → 모든 필드 완료
-                    print(f"   ✅ 모든 필드 완료!")
-                    return _build_final_completion_prompt(bot_config, current_data)
-
-            else:
-                # 서브봇이 아직 실행되지 않았음 → 즉시 서브봇으로 전환!
-                print(f"🤖 서브봇으로 전환!")
-                print(f"   필드명: {current_field_name}")
-                print(f"   서브봇 ID: {sub_bot_id}")
-
-                sub_bot_config = config_manager.get_bot_config(sub_bot_id)
-
-                if not sub_bot_config:
-                    logger.error(f"❌ 서브봇 설정을 찾을 수 없음: {sub_bot_id}")
-                    return f"ERROR: 서브봇 설정을 찾을 수 없습니다: {sub_bot_id}"
-
-                print(f"✅ 서브봇 설정 로드 완료: {sub_bot_config.task_name}")
-
-                # ✅ 1. 서브봇 실행 이력 기록
-                from datetime import datetime
-                executed_subbots[sub_bot_id] = {
-                    'called_from': bot_config.bot_id,
-                    'timestamp': datetime.utcnow().isoformat()
-                }
-                session.set_metadata('executed_subbots', executed_subbots)
-                print(f"   📝 서브봇 실행 이력 기록")
-
-                # ✅ 2. 서브봇으로 전환 (push_bot)
-                session.push_bot(sub_bot_id)
-                print(f"   🔄 봇 스택 전환: {bot_config.bot_id} → {sub_bot_id}")
-
-                # ✅ 3. 히스토리 백업 (서브봇은 깨끗한 상태로 시작)
-                session._main_bot_history = list(session.conversation_history)
-                session.conversation_history = []
-                print(f"   🧹 히스토리 백업 완료")
-
-                # ✅ 4. 서브봇 프롬프트 생성 (경로 1: bot_config.is_subbot과 동일)
-                print(f"   📄 서브봇 프롬프트 생성 (_build_subbot_prompt 호출)")
-                return _build_subbot_prompt(sub_bot_config, current_data) 
+            # 서브봇 프롬프트 생성
+            print(f"   📄 서브봇 프롬프트 생성 (_build_subbot_prompt 호출)")
+            return _build_subbot_prompt(sub_bot_config, current_data) 
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 7️⃣ 현재 step 안내
