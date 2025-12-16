@@ -1114,21 +1114,33 @@ class XMLActionExecutor:
         서브봇 호출 및 즉시 전환
         """
         subbot_id = action.data.get('subbot_id')
-        
+
         if not subbot_id:
             print(f"   ⚠️ subbot_id 없음")
             return
-        
+
         print(f"   🔄 서브봇 전환: {session.get_active_bot()} → {subbot_id}")
-        
+
+        # ✅ 서브봇 실행 이력 기록 (중복 호출 방지)
+        from datetime import datetime
+        executed_subbots = session.get_metadata('executed_subbots', {})
+        current_bot = session.get_active_bot()
+
+        executed_subbots[subbot_id] = {
+            'called_from': current_bot,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        session.set_metadata('executed_subbots', executed_subbots)
+        print(f"   📝 서브봇 실행 이력 기록: {subbot_id}")
+
         # ✅ 즉시 전환
         session.push_bot(subbot_id)
-        
+
         # ✅ 히스토리 백업 (서브봇은 깨끗한 상태로 시작)
         session._main_bot_history = list(session.conversation_history)
         session.conversation_history = []
         print(f"   🧹 히스토리 백업 완료")
-        
+
         result['bot_changed'] = True
         result['target_bot_id'] = subbot_id
     
@@ -3060,8 +3072,9 @@ class SessionStateManager:
         ]
         self.shared_context: Dict[str, Any] = {}
         self.conversation_history: List[Dict[str, str]] = []
-        self.llm_call_count = 0 
+        self.llm_call_count = 0
         self.task_completed = False
+        self.metadata: Dict[str, Any] = {}  # ✅ 메타데이터 추가 (서브봇 실행 이력 등)
     def update_main_bot(self, new_main_bot_id: str):
         """
         메인 봇 업데이트 (봇 재설계 시 사용)
@@ -3126,14 +3139,22 @@ class SessionStateManager:
         if len(self.bot_stack) <= 1:
             print("⚠️ [State] 메인 봇은 pop 불가")
             return None
-        
+
         completed_frame = self.bot_stack.pop()
         completed_frame.state = BotState.COMPLETED
         self.bot_stack[-1].state = BotState.ACTIVE
-        
+
         restored_bot_id = self.bot_stack[-1].bot_id
         print(f"📤 [State] 봇 복귀: {completed_frame.bot_id} → {restored_bot_id}")
         return restored_bot_id
+
+    def get_metadata(self, key: str, default=None):
+        """메타데이터 조회"""
+        return self.metadata.get(key, default)
+
+    def set_metadata(self, key: str, value):
+        """메타데이터 설정"""
+        self.metadata[key] = value
 
 # ============================================
 # STEP 3: Router (규칙 기반 라우팅)
@@ -3609,28 +3630,100 @@ class SessionManager:
         
         is_current_subbot = 'sub_bot_id' in current_var
         print(f"🔍 현재 필드 타입: {'서브봇 ❌' if is_current_subbot else 'user_input ✅'}")
-        
+
         if is_current_subbot:
-            print(f"🤖 서브봇 시작!")
-            print(f"   필드명: {current_field_name}")
-            print(f"   서브봇 ID: {current_var.get('sub_bot_id', '')}")
-            
             sub_bot_id = current_var.get('sub_bot_id', '')
-            
-            sub_bot_config = config_manager.get_bot_config(sub_bot_id)
-            
-            if not sub_bot_config:
-                logger.error(f"❌ 서브봇 설정을 찾을 수 없음: {sub_bot_id}")
-                return f"ERROR: 서브봇 설정을 찾을 수 없습니다: {sub_bot_id}"
-            
-            print(f"✅ 서브봇 설정 로드 완료: {sub_bot_config.task_name}")
-            
-            # ✅ 서브봇 초기 메시지 생성
-            return self._generate_new_bot_initial_message(
-                session=session,
-                new_bot_id=sub_bot_id,
-                transition_message="🤖 서브봇 시작!"  # 또는 적절한 메시지
-            ) 
+
+            # ✅✅✅ 서브봇 실행 이력 확인 (중복 호출 방지!)
+            executed_subbots = session.get_metadata('executed_subbots', {})
+
+            if sub_bot_id in executed_subbots:
+                print(f"⏭️  서브봇 이미 실행됨: {sub_bot_id}")
+                print(f"   실행 시각: {executed_subbots[sub_bot_id].get('timestamp', 'N/A')}")
+                print(f"   호출자: {executed_subbots[sub_bot_id].get('called_from', 'N/A')}")
+                print(f"   ➡️  다음 필드로 건너뛰기")
+
+                # 다음 필드로 이동
+                if next_field_name and next_var:
+                    print(f"   📌 다음 필드를 현재 필드로 재설정: {next_field_name}")
+                    current_field_name = next_field_name
+                    current_var = next_var
+
+                    # 다음 필드도 서브봇인지 재확인
+                    is_current_subbot = 'sub_bot_id' in current_var
+
+                    if is_current_subbot:
+                        # 다음 필드도 서브봇! 재귀적으로 체크 필요
+                        logger.warning(f"⚠️  연속된 서브봇 필드 감지: {next_field_name}")
+                        # 간단하게는 다음 서브봇도 실행 이력 확인 후 처리
+                        # 복잡한 경우 재귀 호출 고려
+                        # 여기서는 일단 경고만 출력하고 계속 진행
+                        # (다음 턴에서 다시 처리됨)
+                else:
+                    # 다음 필드 없음 → 모든 필드 완료
+                    print(f"   ✅ 모든 필드 완료!")
+                    return _build_final_completion_prompt(bot_config, current_data)
+
+            else:
+                # 서브봇이 아직 실행되지 않았음 → LLM이 call_subbot 액션을 실행하도록 프롬프트 생성
+                print(f"🤖 서브봇 호출 프롬프트 생성!")
+                print(f"   필드명: {current_field_name}")
+                print(f"   서브봇 ID: {sub_bot_id}")
+
+                sub_bot_config = config_manager.get_bot_config(sub_bot_id)
+
+                if not sub_bot_config:
+                    logger.error(f"❌ 서브봇 설정을 찾을 수 없음: {sub_bot_id}")
+                    return f"ERROR: 서브봇 설정을 찾을 수 없습니다: {sub_bot_id}"
+
+                print(f"✅ 서브봇 설정 로드 완료: {sub_bot_config.task_name}")
+
+                # ✅ 서브봇 호출을 유도하는 시스템 프롬프트 생성
+                purpose = current_var.get('purpose', sub_bot_config.task_name)
+                description = current_var.get('description', '')
+
+                # llm_execution_guide에서 메시지 추출
+                llm_guide = current_var.get('llm_execution_guide', {})
+                before_execution = llm_guide.get('before_execution', f"{sub_bot_config.task_name}을(를) 시작하겠습니다.")
+
+                return f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🤖 서브봇 호출 필요
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<current_field>
+  <field_name>{current_field_name}</field_name>
+  <type>subbot_call</type>
+  <sub_bot_id>{sub_bot_id}</sub_bot_id>
+  <subbot_name>{sub_bot_config.task_name}</subbot_name>
+  <purpose>{purpose}</purpose>
+  <description>{description}</description>
+</current_field>
+
+**현재 상태:**
+{dict_to_xml(current_data, 'collected_data')}
+
+**다음 단계:**
+현재 단계에서는 **서브봇 호출**이 필요합니다.
+{sub_bot_config.task_name} 작업을 수행하기 위해 서브봇을 호출합니다.
+
+🔥 **즉시 실행해야 할 XML:**
+```xml
+<bot_response>
+  <message>{before_execution}</message>
+  <actions>
+    <action type="call_subbot">
+      <subbot_id>{sub_bot_id}</subbot_id>
+      <purpose>{purpose}</purpose>
+    </action>
+  </actions>
+</bot_response>
+```
+
+⚠️ **중요: 위의 XML을 그대로 응답하세요!**
+- 서브봇이 호출되면 해당 작업을 수행합니다
+- 서브봇 완료 후 자동으로 메인봇으로 복귀합니다
+""" 
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 7️⃣ 현재 step 안내
